@@ -1,0 +1,50 @@
+name: Build macOS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Package
+        run: |
+          set -e
+          mkdir -p out
+          # -iname: trova il plugin anche se cambia maiuscole
+          COMP=$(find build -iname "w-shaper.component" -type d | head -1)
+          VST=$(find build -iname "w-shaper.vst3" -type d | head -1)
+          APP=$(find build -iname "w-shaper.app" -type d | head -1)
+          echo "component: $COMP"; echo "vst3: $VST"; echo "app: $APP"
+          if [ -z "$COMP" ] || [ -z "$VST" ]; then echo "Plugin non trovato nella build"; find build -maxdepth 6 -name "*.component" -o -maxdepth 6 -name "*.vst3"; exit 1; fi
+          cp -R "$COMP" out/
+          cp -R "$VST" out/
+          if [ -n "$APP" ]; then cp -R "$APP" out/; fi
+          for f in out/*; do codesign --force --deep -s - "$f"; done
+          cp installer/Installa.command out/
+          chmod +x out/Installa.command
+          ditto -c -k --keepParent out W-Shaper-macOS.zip
+
+      - name: Test AU (auval)
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R out/*.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aufx Wshp Umsm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: W-Shaper-macOS
+          path: W-Shaper-macOS.zip
