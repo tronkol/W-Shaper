@@ -20,7 +20,7 @@ Interfaccia della famiglia Smoker: piatta, verticale (422×640, ridimensionabile
 - **Menu delle bande**: LIVE (latenza zero), 513, 1025 (default), 2049, 4097 o 8193 bande.
 - **Display**: il tuo timbro (pieno), quello di riferimento (tratteggiato) e la correzione intorno alla linea dello zero. I bordi della banda si trascinano dalle maniglie in basso.
 - **START / END** e **SLOPE**: dove trasferire il timbro.
-- **AMOUNT**: quanto timbro prendi. Le alzate sono limitate a +18 dB.
+- **AMOUNT**: quanto timbro prendi. Le alzate sono limitate a +24 dB.
 - **MAKEUP**: guadagno solo nella banda.
 - **ATTACK / RELEASE**: velocità della correzione.
 - **DETAIL**: da colore generale a ogni risonanza della voce di riferimento.

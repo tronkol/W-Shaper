@@ -737,7 +737,7 @@ WShaperEditor::WShaperEditor (WShaperProcessor& p)
     : AudioProcessorEditor (&p), proc (p), nsView (p), nsMeter (p), refView (p), meters (p), status (p)
 {
     setLookAndFeel (&look);
-    look.setSkin ((int) proc.apvts.state.getProperty ("skin", 0));
+    look.setSkin (proc.uiSkin.load());
 
     addAndMakeVisible (content);
     content.addAndMakeVisible (clip);
@@ -857,7 +857,7 @@ WShaperEditor::WShaperEditor (WShaperProcessor& p)
     setSize (baseW, baseH);
 
     applySkin (look.getSkin());
-    showPage ((int) proc.apvts.state.getProperty ("uiPage", 0), false);
+    showPage (proc.uiPage.load(), false);
     refreshRefLabel();
     timerCallback();
     startTimerHz (60);
@@ -877,7 +877,7 @@ std::vector<WShaperEditor::Knob*> WShaperEditor::allKnobs()
 void WShaperEditor::applySkin (int index)
 {
     look.setSkin (index);
-    proc.apvts.state.setProperty ("skin", look.getSkin(), nullptr);
+    proc.uiSkin = look.getSkin();
     const auto& p = look.pal();
     for (auto* k : allKnobs())
     {
@@ -941,7 +941,7 @@ void WShaperEditor::placeKnob (Knob& k, Rectangle<int> cell)
 void WShaperEditor::showPage (int newPage, bool animate)
 {
     page = jlimit (0, kPages - 1, newPage);
-    proc.apvts.state.setProperty ("uiPage", page, nullptr);
+    proc.uiPage = page;
     for (int i = 0; i < kPages; ++i)
         tabs[(size_t) i].setToggleState (i == page, dontSendNotification);
     animTo = (float) (page * baseW);

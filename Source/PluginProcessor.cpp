@@ -39,11 +39,11 @@ AudioProcessorValueTreeState::ParameterLayout WShaperProcessor::createLayout()
     fl ("start",    "Start",    skewed (20.0f, 20000.0f, 1000.0f), 80.0f, hz);
     fl ("end",      "End",      skewed (20.0f, 20000.0f, 1000.0f), 16000.0f, hz);
     fl ("slope",    "Slope",    skewed (6.0f, 96.0f, 24.0f), 24.0f, dbo);
-    fl ("amount",   "Amount",   { 0.0f, 100.0f, 0.1f }, 80.0f, pct);
+    fl ("amount",   "Amount",   { 0.0f, 100.0f, 0.1f }, 90.0f, pct);
     fl ("makeup",   "Makeup",   { -24.0f, 24.0f, 0.1f }, 0.0f, db);
     fl ("attack",   "Attack",   skewed (0.1f, 500.0f, 20.0f), 10.0f, ms);
     fl ("release",  "Release",  skewed (1.0f, 2000.0f, 150.0f), 60.0f, ms);
-    fl ("detail",   "Detail",   { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
+    fl ("detail",   "Detail",   { 0.0f, 100.0f, 0.1f }, 60.0f, pct);
     fl ("match",    "Match",    { 0.0f, 100.0f, 0.1f }, 85.0f, pct);
     fl ("loudness", "Loudness", { 0.0f, 100.0f, 0.1f }, 30.0f, pct);
     fl ("formant",  "Formant",  { -12.0f, 12.0f, 0.1f }, 0.0f, st);
@@ -96,7 +96,14 @@ void WShaperProcessor::prepareToPlay (double sampleRate, int)
     setLatencySamples (engine->latency());
     outGain.reset (sampleRate, 0.05);
     outGain.setCurrentAndTargetValue (Decibels::decibelsToGain (apvts.getRawParameterValue ("output")->load()));
-    rebuildReference();
+    requestRebuild(); // Logic puo' chiamare prepareToPlay da un altro thread: il modello si ricostruisce sul thread dei messaggi
+}
+
+void WShaperProcessor::requestRebuild()
+{
+    if (MessageManager::existsAndIsCurrentThread()) { rebuildReference(); return; }
+    std::weak_ptr<bool> w = alive;
+    MessageManager::callAsync ([this, w] { if (! w.expired()) rebuildReference(); });
 }
 
 void WShaperProcessor::handleAsyncUpdate()
@@ -110,7 +117,7 @@ void WShaperProcessor::handleAsyncUpdate()
         std::swap (engine, e);
     }
     setLatencySamples (engine->latency());
-    rebuildReference(); // il timbro medio va ricalcolato alla nuova risoluzione
+    rebuildReference(); // il modello va ricalcolato alla nuova risoluzione
 }
 
 void WShaperProcessor::readParams (wsk::Params& p)
@@ -184,13 +191,16 @@ bool WShaperProcessor::loadReference (const File& file)
     const int maxLen = (int) jmin<int64> (reader->lengthInSamples, (int64) (reader->sampleRate * 300.0)); // max 5 minuti
     AudioBuffer<float> b ((int) jmin<unsigned int> (2u, reader->numChannels), maxLen);
     reader->read (&b, 0, maxLen, 0, true, b.getNumChannels() > 1);
+    std::vector<float> mono ((size_t) maxLen, 0.0f);
+    for (int c = 0; c < b.getNumChannels(); ++c)
+        for (int i = 0; i < maxLen; ++i) mono[(size_t) i] += b.getSample (c, i) / (float) b.getNumChannels();
     {
         const ScopedLock sl (refLock);
-        refSource = std::move (b);
+        refSource = std::move (mono);
         refSourceRate = reader->sampleRate;
         refName = file.getFileName();
+        refPath = file.getFullPathName();
     }
-    apvts.state.setProperty ("referencePath", file.getFullPathName(), nullptr);
     rebuildReference();
     return true;
 }
@@ -199,56 +209,54 @@ void WShaperProcessor::clearReference()
 {
     {
         const ScopedLock sl (refLock);
-        refSource.setSize (0, 0);
+        refSource.clear();
         refName = {};
+        refPath = {};
     }
-    apvts.state.setProperty ("referencePath", String(), nullptr);
     currentRef.store (nullptr);
     ++refVersion;
 }
 
 void WShaperProcessor::rebuildReference()
 {
+    jassert (MessageManager::existsAndIsCurrentThread());
     const ScopedLock sl (refLock);
-    if (refSource.getNumSamples() == 0 || refSourceRate <= 0.0) return;
+    if (refSource.empty() || refSourceRate <= 0.0) return;
 
     auto r = std::make_unique<RefData>();
     auto& t = r->audio;
     const double ratio = refSourceRate / currentSR;
-    const int outLen = jmax (1, (int) std::floor (refSource.getNumSamples() / ratio));
-    t.numCh = refSource.getNumChannels();
+    const int inLen = (int) refSource.size();
+    const int outLen = jmax (1, (int) std::floor ((double) (inLen - 8) / ratio));
+    std::vector<float> mono ((size_t) outLen, 0.0f);
+    {
+        // copia con un po' di zeri in coda: l'interpolatore non legge mai oltre la fine
+        std::vector<float> padded (refSource);
+        padded.resize (refSource.size() + 64, 0.0f);
+        LagrangeInterpolator interp;
+        interp.process (ratio, padded.data(), mono.data(), outLen);
+    }
+    t.numCh = 1;
     t.length = outLen;
     t.sampleRate = currentSR;
     t.name = refName.toStdString();
     float peak = 0.0f;
-    for (int c = 0; c < t.numCh; ++c)
-    {
-        t.ch[c].assign ((size_t) outLen, 0.0f);
-        LagrangeInterpolator interp;
-        interp.process (ratio, refSource.getReadPointer (c), t.ch[c].data(), outLen);
-        for (auto s : t.ch[c]) peak = jmax (peak, std::abs (s));
-    }
+    for (auto v : mono) peak = jmax (peak, std::abs (v));
     t.overview.assign (512, 0.0f);
     for (int i = 0; i < 512; ++i)
     {
         const int a = (int) ((int64) i * outLen / 512), b = jmax (a + 1, (int) ((int64) (i + 1) * outLen / 512));
         float m = 0.0f;
-        for (int c = 0; c < t.numCh; ++c)
-            for (int k = a; k < b && k < outLen; ++k) m = jmax (m, std::abs (t.ch[c][(size_t) k]));
+        for (int k = a; k < b && k < outLen; ++k) m = jmax (m, std::abs (mono[(size_t) k]));
         t.overview[(size_t) i] = peak > 0.0f ? m / peak : 0.0f;
     }
-
-    // modello del timbro dell'a cappella, alla risoluzione attuale del motore
-    {
-        std::vector<float> mono ((size_t) outLen, 0.0f);
-        for (int c = 0; c < t.numCh; ++c)
-            for (int i = 0; i < outLen; ++i) mono[(size_t) i] += t.ch[c][(size_t) i] / (float) t.numCh;
-        r->model = wsk::buildTimbreModel (mono.data(), outLen, (float) currentSR, wsk::Engine::fftSizeFor (currentSR, currentRes()));
-    }
+    // modello del timbro alla risoluzione attuale; l'audio non resta in memoria (basta il modello)
+    r->model = wsk::buildTimbreModel (mono.data(), outLen, (float) currentSR, wsk::Engine::fftSizeFor (currentSR, currentRes()));
 
     currentRef.store (r.get());
     refStore.push_back (std::move (r));
-    while (refStore.size() > 2) refStore.erase (refStore.begin());
+    // i modelli vecchi restano vivi ancora un po': li puo' usare l'audio o l'interfaccia
+    while (refStore.size() > 6) refStore.erase (refStore.begin());
     ++refVersion;
 }
 
@@ -280,7 +288,16 @@ void WShaperProcessor::applyPreset (int index)
 
 void WShaperProcessor::getStateInformation (MemoryBlock& destData)
 {
-    if (auto xml = apvts.copyState().createXml())
+    // le informazioni dell'interfaccia vengono aggiunte alla COPIA dello stato: nessuno scrive nello stato
+    // condiviso da thread diversi (Logic salva da un suo thread)
+    auto state = apvts.copyState();
+    {
+        const ScopedLock sl (refLock);
+        state.setProperty ("referencePath", refPath, nullptr);
+    }
+    state.setProperty ("skin", uiSkin.load(), nullptr);
+    state.setProperty ("uiPage", uiPage.load(), nullptr);
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -289,8 +306,11 @@ void WShaperProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (ValueTree::fromXml (*xml));
-            const String path = apvts.state.getProperty ("referencePath", String()).toString();
+            const auto tree = ValueTree::fromXml (*xml);
+            uiSkin = (int) tree.getProperty ("skin", 0);
+            uiPage = (int) tree.getProperty ("uiPage", 0);
+            const String path = tree.getProperty ("referencePath", String()).toString();
+            apvts.replaceState (tree);
             if (path.isNotEmpty())
             {
                 std::weak_ptr<bool> w = alive;

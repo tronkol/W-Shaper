@@ -66,7 +66,8 @@ private:
     int currentRes() const { return (int) apvts.getRawParameterValue ("res")->load(); }
     void readParams (wsk::Params&);
     void run (juce::AudioBuffer<float>&, bool bypass);
-    void rebuildReference();
+    void rebuildReference();        // solo sul thread dei messaggi
+    void requestRebuild();
 
     wsk::Vis visData;
     std::unique_ptr<wsk::Engine> engine;
@@ -76,7 +77,11 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outGain { 1.0f };
 
     juce::AudioFormatManager formats;
-    juce::AudioBuffer<float> refSource;
+    std::vector<float> refSource;     // a cappella mono, al sample rate del file
+    juce::String refPath;             // salvati nello stato solo dentro getStateInformation
+public:
+    std::atomic<int> uiSkin { 0 }, uiPage { 0 };
+private:
     double refSourceRate = 0.0;
     juce::String refName;
     std::atomic<const RefData*> currentRef { nullptr };

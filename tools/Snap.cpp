@@ -35,8 +35,8 @@ int main (int argc, char** argv)
         for (int pg = 0; pg < 2; ++pg)
         {
             if (skin > 0 && pg > 0) continue;
-            proc.apvts.state.setProperty ("skin", skin, nullptr);
-            proc.apvts.state.setProperty ("uiPage", pg, nullptr);
+            proc.uiSkin = skin;
+            proc.uiPage = pg;
             std::unique_ptr<AudioProcessorEditor> ed (proc.createEditor());
             MessageManager::getInstance()->runDispatchLoopUntil (400);
             auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 2.0f);

@@ -999,12 +999,13 @@ private:
                 bd[j] = dsum; bi[j] = f;
             }
         }
+        // pesi netti: l'istante piu' simile conta molto di piu' degli altri (niente media che appiattisce)
         float wsum = 0.0f;
         std::fill (dynCeps.begin(), dynCeps.end(), 0.0f);
         for (int j = 0; j < kNN; ++j)
         {
             if (bi[j] < 0) continue;
-            const float w = 1.0f / (bd[j] + 0.5f);
+            const float w = std::exp (-(bd[j] - bd[0]) / 1.5f);
             wsum += w;
             const float* c = m.ceps.data() + (size_t) bi[j] * kCeps;
             for (int n = 0; n < kCeps; ++n) dynCeps[(size_t) n] += w * c[n];
@@ -1133,7 +1134,7 @@ private:
         {
             const float w = bandW[(size_t) k];
             float d = silent ? 0.0f : amt * (curTgt[(size_t) k] + off - nsSm[(size_t) k]);
-            d = d > 0.0f ? std::min (d, 18.0f) : std::max (d, -40.0f);
+            d = d > 0.0f ? std::min (d, 24.0f) : std::max (d, -40.0f);
             const float tg = w * (d + (modelOk ? prm.nsMakeupDb : 0.0f));
             float& gs = nsG[(size_t) k];
             gs += (tg < gs ? aAtt : aRel) * (tg - gs);
