@@ -33,47 +33,27 @@ AudioProcessorValueTreeState::ParameterLayout WShaperProcessor::createLayout()
         p.push_back (std::make_unique<F> (ParameterID { id, 1 }, name, r, def, A().withStringFromValueFunction (fmt)));
     };
 
-    // SHAPER
+    // TIMBRE
     p.push_back (std::make_unique<C> (ParameterID { "res", 1 }, "Resolution",
                                       StringArray { "LIVE (zero latency)", "513 bands", "1025 bands", "2049 bands", "4097 bands", "8193 bands" }, 2));
-    p.push_back (std::make_unique<C> (ParameterID { "target", 1 }, "Target", StringArray { "Sibilants", "Full Signal" }, 1));
-    fl ("start",   "Start",   skewed (20.0f, 20000.0f, 1000.0f), 120.0f, hz);
-    fl ("end",     "End",     skewed (20.0f, 20000.0f, 1000.0f), 16000.0f, hz);
-    fl ("slope",   "Slope",   skewed (6.0f, 96.0f, 24.0f), 24.0f, dbo);
-    fl ("amount",  "Amount",  { 0.0f, 100.0f, 0.1f }, 70.0f, pct);
-    fl ("makeup",  "Makeup",  { -24.0f, 24.0f, 0.1f }, 0.0f, db);
-    fl ("attack",  "Attack",  skewed (0.1f, 500.0f, 20.0f), 10.0f, ms);
-    fl ("release", "Release", skewed (1.0f, 2000.0f, 150.0f), 120.0f, ms);
-    fl ("detail",  "Detail",  { 0.0f, 100.0f, 0.1f }, 40.0f, pct);
-    fl ("dynamic", "Dynamic", { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
-    fl ("formant", "Formant", { -12.0f, 12.0f, 0.1f }, 0.0f, st);
-
-    // SOURCE
-    p.push_back (std::make_unique<C> (ParameterID { "source", 1 }, "Source", StringArray { "Noise", "File Profile", "File Follow" }, 2));
-    {
-        StringArray noises;
-        for (int i = 0; i < wsk::kNumNoises; ++i) noises.add (wsk::noiseName (i));
-        p.push_back (std::make_unique<C> (ParameterID { "noise", 1 }, "Noise", noises, 1));
-    }
-    fl ("rate",    "Follow Rate",   skewed (10.0f, 400.0f, 100.0f), 100.0f, pct);
-    fl ("smooth",  "Follow Smooth", skewed (1.0f, 2000.0f, 80.0f), 60.0f, ms);
-    p.push_back (std::make_unique<B> (ParameterID { "freeze", 1 }, "Freeze", false));
-
-    // DETECT
-    p.push_back (std::make_unique<B> (ParameterID { "detS", 1 }, "Detect S/Z/SH", true));
-    p.push_back (std::make_unique<B> (ParameterID { "detF", 1 }, "Detect F/V", true));
-    p.push_back (std::make_unique<B> (ParameterID { "detC", 1 }, "Detect CH/J", true));
-    fl ("sensS", "Sens S", { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
-    fl ("sensF", "Sens F", { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
-    fl ("sensC", "Sens C", { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
-    fl ("hold",  "Hold",   skewed (5.0f, 250.0f, 40.0f), 40.0f, ms);
-    fl ("guard", "Vowel Guard", { 0.0f, 100.0f, 0.1f }, 60.0f, pct);
+    fl ("start",    "Start",    skewed (20.0f, 20000.0f, 1000.0f), 80.0f, hz);
+    fl ("end",      "End",      skewed (20.0f, 20000.0f, 1000.0f), 16000.0f, hz);
+    fl ("slope",    "Slope",    skewed (6.0f, 96.0f, 24.0f), 24.0f, dbo);
+    fl ("amount",   "Amount",   { 0.0f, 100.0f, 0.1f }, 80.0f, pct);
+    fl ("makeup",   "Makeup",   { -24.0f, 24.0f, 0.1f }, 0.0f, db);
+    fl ("attack",   "Attack",   skewed (0.1f, 500.0f, 20.0f), 10.0f, ms);
+    fl ("release",  "Release",  skewed (1.0f, 2000.0f, 150.0f), 60.0f, ms);
+    fl ("detail",   "Detail",   { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
+    fl ("match",    "Match",    { 0.0f, 100.0f, 0.1f }, 85.0f, pct);
+    fl ("loudness", "Loudness", { 0.0f, 100.0f, 0.1f }, 30.0f, pct);
+    fl ("formant",  "Formant",  { -12.0f, 12.0f, 0.1f }, 0.0f, st);
+    fl ("smooth",   "Smooth",   skewed (1.0f, 1000.0f, 60.0f), 30.0f, ms);
+    fl ("dynamic",  "Gate",     { 0.0f, 100.0f, 0.1f }, 50.0f, pct);
 
     // piede
     fl ("mix",    "Mix",    { 0.0f, 100.0f, 0.1f }, 100.0f, pct);
     fl ("output", "Output", { -24.0f, 24.0f, 0.1f }, 0.0f, db);
     p.push_back (std::make_unique<B> (ParameterID { "delta", 1 },  "Delta", false));
-    p.push_back (std::make_unique<B> (ParameterID { "listen", 1 }, "Consonants Only", false));
 
     return { p.begin(), p.end() };
 }
@@ -137,8 +117,7 @@ void WShaperProcessor::readParams (wsk::Params& p)
 {
     auto v = [this] (const char* id) { return apvts.getRawParameterValue (id)->load(); };
     p.nsOn        = true;
-    p.nsFull      = v ("target") > 0.5f;
-    p.nsNoise     = (int) v ("noise");
+    p.nsFull      = true;
     p.nsStart     = v ("start");
     p.nsEnd       = v ("end");
     p.nsSlope     = v ("slope");
@@ -146,24 +125,19 @@ void WShaperProcessor::readParams (wsk::Params& p)
     p.nsMakeupDb  = v ("makeup");
     p.nsAttackMs  = v ("attack");
     p.nsReleaseMs = v ("release");
-    p.nsSpeedMs   = 8.0f; // analisi dell'ingresso: la velocita' la decidono ATTACK e RELEASE
+    p.nsSpeedMs   = 8.0f;
     p.nsDetail    = v ("detail") * 0.01f;
     p.nsDynamic   = v ("dynamic") * 0.01f;
     p.nsFormantSt = v ("formant");
-    p.nsSource    = (int) v ("source");
-    p.nsRate      = v ("rate") * 0.01f;
     p.nsSmoothMs  = v ("smooth");
-    p.nsFreeze    = v ("freeze") > 0.5f;
-
-    p.enS = v ("detS") > 0.5f; p.enF = v ("detF") > 0.5f; p.enC = v ("detC") > 0.5f;
-    p.sensS = v ("sensS") * 0.01f; p.sensF = v ("sensF") * 0.01f; p.sensC = v ("sensC") * 0.01f;
-    p.holdMs = v ("hold");
-    p.guard  = v ("guard") * 0.01f;
-    p.link   = 1.0f;
+    p.tmMatch     = v ("match") * 0.01f;
+    p.tmLoud      = v ("loudness") * 0.01f;
+    p.link        = 1.0f;
+    p.enS = p.enF = p.enC = false;
 
     p.mix    = v ("mix") * 0.01f;
     p.delta  = v ("delta") > 0.5f;
-    p.listen = v ("listen") > 0.5f;
+    p.listen = false;
     p.texOn  = false;
 }
 
@@ -184,8 +158,7 @@ void WShaperProcessor::run (AudioBuffer<float>& buffer, bool bypass)
         if (! sl.isLocked() || engine == nullptr) { buffer.clear(); return; }
         const RefData* r = currentRef.load();
         engine->setParams (p);
-        engine->setReference (r != nullptr ? &r->audio : nullptr,
-                              (r != nullptr && r->profileN == engine->fftSize()) ? &r->profile : nullptr);
+        engine->setModel (r != nullptr ? &r->model : nullptr);
         engine->process (buffer.getArrayOfWritePointers(), nc, buffer.getNumSamples());
     }
 
@@ -265,53 +238,12 @@ void WShaperProcessor::rebuildReference()
         t.overview[(size_t) i] = peak > 0.0f ? m / peak : 0.0f;
     }
 
-    // timbro medio: media delle potenze dei frame che non sono silenzio (fino a 40 dB sotto il frame piu' forte)
-    const int N = wsk::Engine::fftSizeFor (currentSR, currentRes());
-    const int K = N / 2 + 1;
-    r->profileN = N;
-    r->profile.assign ((size_t) K, -120.0f);
-    if (outLen >= N)
+    // modello del timbro dell'a cappella, alla risoluzione attuale del motore
     {
-        wsk::FFT fft;
-        fft.init (N);
-        std::vector<wsk::cpx> buf ((size_t) N);
-        std::vector<float> win ((size_t) N);
-        for (int j = 0; j < N; ++j) win[(size_t) j] = 0.5f - 0.5f * std::cos (2.0f * wsk::kPi * (float) j / (float) N);
-        const int hop = N / 2;
-        const int frames = jmin (4000, (outLen - N) / hop + 1);
-        const int step = jmax (1, ((outLen - N) / hop + 1) / frames);
-        std::vector<std::vector<float>> spec;
-        std::vector<float> lvl;
-        for (int f = 0; f < frames; ++f)
-        {
-            const int s0 = f * step * hop;
-            if (s0 + N > outLen) break;
-            for (int j = 0; j < N; ++j)
-            {
-                float x = 0.0f;
-                for (int c = 0; c < t.numCh; ++c) x += t.ch[c][(size_t) (s0 + j)];
-                buf[(size_t) j] = { x / (float) t.numCh * win[(size_t) j], 0.0f };
-            }
-            fft.transform (buf.data(), false);
-            std::vector<float> pw ((size_t) K);
-            double tot = 0.0;
-            for (int k = 0; k < K; ++k) { pw[(size_t) k] = std::norm (buf[(size_t) k]); tot += pw[(size_t) k]; }
-            spec.push_back (std::move (pw));
-            lvl.push_back ((float) tot);
-        }
-        const float mx = lvl.empty() ? 0.0f : *std::max_element (lvl.begin(), lvl.end());
-        std::vector<double> acc ((size_t) K, 0.0);
-        int used = 0;
-        for (size_t f = 0; f < spec.size(); ++f)
-            if (lvl[f] > mx * 1.0e-4f)
-            {
-                for (int k = 0; k < K; ++k) acc[(size_t) k] += spec[f][(size_t) k];
-                ++used;
-            }
-        const float pnorm = 16.0f / ((float) N * (float) N);
-        if (used > 0)
-            for (int k = 0; k < K; ++k)
-                r->profile[(size_t) k] = wsk::powToDb ((float) (acc[(size_t) k] / used) * pnorm);
+        std::vector<float> mono ((size_t) outLen, 0.0f);
+        for (int c = 0; c < t.numCh; ++c)
+            for (int i = 0; i < outLen; ++i) mono[(size_t) i] += t.ch[c][(size_t) i] / (float) t.numCh;
+        r->model = wsk::buildTimbreModel (mono.data(), outLen, (float) currentSR, wsk::Engine::fftSizeFor (currentSR, currentRes()));
     }
 
     currentRef.store (r.get());
@@ -336,7 +268,7 @@ void WShaperProcessor::applyPreset (int index)
     const auto& l = wsp::presets();
     if (! isPositiveAndBelow (index, (int) l.size())) return;
     currentPreset = index;
-    static const StringArray keep { "delta", "listen", "output", "res", "mix" };
+    static const StringArray keep { "delta", "output", "res", "mix" };
     for (auto* prm : getParameters())
         if (auto* r = dynamic_cast<RangedAudioParameter*> (prm))
             if (! keep.contains (r->getParameterID()))

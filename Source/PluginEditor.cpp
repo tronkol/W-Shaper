@@ -288,112 +288,6 @@ static void drawWordmark (Graphics& g, Rectangle<float> box, const ui::Palette& 
 
 //==============================================================================
 //==============================================================================
-DetectTimeline::DetectTimeline (WShaperProcessor& p) : proc (p)
-{
-    setInterceptsMouseClicks (false, false);
-    // parte dalla storia gia' registrata: aprendo la pagina si vede subito cosa e' successo
-    const uint32_t w = proc.vis().histW.load();
-    readPos = w > (uint32_t) wsk::Vis::kHist ? w - (uint32_t) wsk::Vis::kHist : 0u;
-    startTimerHz (30);
-}
-
-void DetectTimeline::timerCallback()
-{
-    auto& v = proc.vis();
-    const uint32_t w = v.histW.load();
-    if (w - readPos > (uint32_t) wsk::Vis::kHist) readPos = w - (uint32_t) wsk::Vis::kHist;
-    while (readPos != w)
-    {
-        const auto& h = v.hist[(size_t) (readPos % wsk::Vis::kHist)];
-        cols[(size_t) head] = { h.s.load(), h.f.load(), h.c.load(), h.d.load(), h.lvl.load() };
-        head = (head + 1) % kCols;
-        ++readPos;
-    }
-    repaint();
-}
-
-void DetectTimeline::paint (Graphics& g)
-{
-    const auto& p = palOf (*this);
-    auto b = getLocalBounds().toFloat();
-    g.setColour (p.body);
-    g.fillRoundedRectangle (b, 5.0f);
-    auto r = b.reduced (6.0f, 6.0f);
-    r.removeFromTop (14.0f);
-
-    g.setFont (ui::font (9.5f, true));
-    const char* names[] = { "S Z SH", "F V", "CH J" };
-    float lx = b.getX() + 8.0f;
-    for (int k = 0; k < 3; ++k)
-    {
-        g.setColour (p.cls[(size_t) k]);
-        g.fillPath (geo::body ({ lx + 4.0f, b.getY() + 11.0f }, 3.5f));
-        g.setColour (p.text.withAlpha (0.75f));
-        g.drawText (names[k], Rectangle<float> (lx + 11.0f, b.getY() + 4.0f, 50.0f, 14.0f), Justification::centredLeft);
-        lx += 58.0f;
-    }
-    g.setColour (p.text.withAlpha (0.45f));
-    g.drawText ("last 3 s", Rectangle<float> (b.getRight() - 70.0f, b.getY() + 4.0f, 62.0f, 14.0f), Justification::centredRight);
-
-    const float dx = r.getWidth() / (float) (kCols - 1);
-    const float mid = r.getCentreY();
-
-    // livello del segnale (forma d'onda tenue)
-    {
-        Path wv;
-        wv.startNewSubPath (r.getX(), mid);
-        for (int i = 0; i < kCols; ++i)
-        {
-            const auto& c = cols[(size_t) ((head + i) % kCols)];
-            wv.lineTo (r.getX() + dx * (float) i, mid - c.lvl * c.lvl * r.getHeight() * 0.48f);
-        }
-        for (int i = kCols - 1; i >= 0; --i)
-        {
-            const auto& c = cols[(size_t) ((head + i) % kCols)];
-            wv.lineTo (r.getX() + dx * (float) i, mid + c.lvl * c.lvl * r.getHeight() * 0.48f);
-        }
-        wv.closeSubPath();
-        g.setColour (p.text.withAlpha (0.10f));
-        g.fillPath (wv);
-    }
-
-    // rilevamento combinato (area) + classi (linee)
-    {
-        Path area;
-        area.startNewSubPath (r.getX(), r.getBottom());
-        for (int i = 0; i < kCols; ++i)
-            area.lineTo (r.getX() + dx * (float) i, r.getBottom() - cols[(size_t) ((head + i) % kCols)].d * r.getHeight());
-        area.lineTo (r.getRight(), r.getBottom());
-        area.closeSubPath();
-        g.setColour (p.strong.withAlpha (0.10f));
-        g.fillPath (area);
-    }
-    for (int k = 0; k < 3; ++k)
-    {
-        // solo dove la classe e' presente: niente linee piatte sul fondo
-        Path ln;
-        bool open = false;
-        for (int i = 0; i < kCols; ++i)
-        {
-            const auto& c = cols[(size_t) ((head + i) % kCols)];
-            const float v = k == 0 ? c.s : (k == 1 ? c.f : c.c);
-            const Point<float> pt (r.getX() + dx * (float) i, r.getBottom() - v * r.getHeight());
-            if (v > 0.01f)
-            {
-                if (! open) { ln.startNewSubPath (pt.withY (r.getBottom())); open = true; }
-                ln.lineTo (pt);
-            }
-            else if (open)
-            {
-                ln.lineTo (pt.withY (r.getBottom()));
-                open = false;
-            }
-        }
-        g.setColour (p.cls[(size_t) k]);
-        g.strokePath (ln, PathStrokeType (1.4f));
-    }
-}
-
 //==============================================================================
 NsView::NsView (WShaperProcessor& p) : proc (p)
 {
@@ -453,7 +347,6 @@ void NsView::paint (Graphics& g)
     auto val = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
     const bool on = true;
     const float fs = val ("start"), fe = val ("end"), slope = val ("slope");
-    const int noise = (int) val ("noise");
 
     // banda: piu' chiara dove N-SHAPER lavora, sfuma con la SLOPE
     for (int x = 0; x < (int) r.getWidth(); x += 2)
@@ -537,15 +430,13 @@ void NsView::paint (Graphics& g)
         const bool hot = e == drag || e == hover;
         g.setColour (p.accent.withAlpha (hot ? 1.0f : 0.7f));
         g.fillRect (x - 0.5f, r.getY(), 1.0f, r.getHeight());
-        g.fillPath (geo::body ({ x, r.getY() + 10.0f }, hot ? 6.0f : 5.0f));
+        g.fillPath (geo::body ({ x, r.getBottom() - 26.0f }, hot ? 6.0f : 5.0f)); // in basso: non copre le scritte
     }
 
     g.setFont (ui::font (10.0f, true));
     g.setColour (p.curve);
-    const int src = (int) val ("source");
     const bool fileOn = proc.vis().refActive.load() != 0;
-    const String tgtName = src == 0 || ! fileOn ? String (wsk::noiseName (noise)) + " NOISE"
-                                                : (src == 1 ? String ("FILE: AVERAGE TIMBRE") : String ("FILE: FOLLOWING"));
+    const String tgtName = fileOn ? String ("REFERENCE TIMBRE") : String ("NO REFERENCE: LOAD AN A CAPPELLA");
     g.drawText (tgtName, Rectangle<float> (r.getX() + 8.0f, r.getY() + 4.0f, 220.0f, 14.0f), Justification::centredLeft);
     g.setColour (p.gr);
     g.drawText ("CORRECTION", Rectangle<float> (r.getX() + 8.0f, r.getY() + 18.0f, 140.0f, 14.0f), Justification::centredLeft);
@@ -717,60 +608,20 @@ void Meters::paint (Graphics& g)
 }
 
 //==============================================================================
-DetectLights::DetectLights (WShaperProcessor& p) : proc (p)
-{
-    setInterceptsMouseClicks (false, false);
-    startTimerHz (30);
-}
-
-void DetectLights::timerCallback()
-{
-    auto& v = proc.vis();
-    const float now[] = { v.sib.load(), v.fv.load(), v.cg.load() };
-    for (size_t k = 0; k < 3; ++k)
-        lv[k] = now[k] > lv[k] ? now[k] : lv[k] * 0.82f;
-    repaint();
-}
-
-void DetectLights::paint (Graphics& g)
-{
-    const auto& p = palOf (*this);
-    auto b = getLocalBounds().toFloat();
-    const char* names[] = { "S Z SH", "F V", "CH J" };
-    const char* ids[]   = { "detS", "detF", "detC" };
-    float x = b.getX();
-    g.setFont (ui::font (9.5f, true));
-    for (int k = 0; k < 3; ++k)
-    {
-        const bool en = proc.apvts.getRawParameterValue (ids[k])->load() > 0.5f;
-        const Point<float> c (x + 5.0f, b.getCentreY());
-        g.setColour (p.text.withAlpha (0.2f));
-        g.fillPath (geo::body (c, 4.0f));
-        if (en && lv[(size_t) k] > 0.02f)
-        {
-            g.setColour (p.cls[(size_t) k].withAlpha (jlimit (0.0f, 1.0f, lv[(size_t) k])));
-            g.fillPath (geo::body (c, 4.0f));
-        }
-        g.setColour (p.text.withAlpha (en ? 0.75f : 0.3f));
-        g.drawText (names[k], Rectangle<float> (x + 13.0f, b.getY(), 52.0f, b.getHeight()), Justification::centredLeft);
-        x += 66.0f;
-    }
-    g.setColour (p.text.withAlpha (0.5f));
-    g.setFont (ui::font (9.5f));
-    g.drawText ("LATENCY " + String (proc.latencyMs()) + " ms", b, Justification::centredRight);
-}
-
-//==============================================================================
 //==============================================================================
 RefView::RefView (WShaperProcessor& p) : proc (p)
 {
     setInterceptsMouseClicks (false, false);
+    trail.fill (-1.0f);
     startTimerHz (30);
 }
 
 void RefView::timerCallback()
 {
-    pos = proc.vis().refPos.load();
+    auto& v = proc.vis();
+    trail[(size_t) head] = v.refActive.load() != 0 ? v.refPos.load() : -1.0f;
+    head = (head + 1) % kTrail;
+    quality += (v.matchQ.load() - quality) * 0.3f;
     repaint();
 }
 
@@ -781,16 +632,15 @@ void RefView::paint (Graphics& g)
     g.setColour (p.body);
     g.fillRoundedRectangle (b, 5.0f);
     const auto* r = proc.reference();
-    const int src = (int) proc.apvts.getRawParameterValue ("source")->load();
     if (r == nullptr || r->audio.overview.empty())
     {
         g.setColour (p.text.withAlpha (0.55f));
         g.setFont (ui::font (11.0f));
-        g.drawFittedText ("No file loaded. Load a voice (or any sound): its timbre becomes the target.\n"
-                          "Until then W-Shaper uses the selected noise.", b.reduced (14.0f, 0.0f).toNearestInt(), Justification::centred, 3);
+        g.drawFittedText ("No reference loaded.\nLoad an a cappella of the voice you want to sound like.",
+                          b.reduced (14.0f, 0.0f).toNearestInt(), Justification::centred, 3);
         return;
     }
-    auto area = b.reduced (8.0f, 10.0f);
+    auto area = b.reduced (8.0f, 22.0f);
     const auto& ov = r->audio.overview;
     const int n = (int) ov.size();
     Path w;
@@ -800,31 +650,57 @@ void RefView::paint (Graphics& g)
     for (int i = n - 1; i >= 0; --i)
         w.lineTo (area.getX() + area.getWidth() * (float) i / (float) (n - 1), area.getCentreY() + ov[(size_t) i] * area.getHeight() * 0.5f);
     w.closeSubPath();
-    const bool used = src != 0;
-    g.setColour (p.text.withAlpha (used ? 0.55f : 0.2f));
+    g.setColour (p.text.withAlpha (0.45f));
     g.fillPath (w);
 
+    // gli istanti dell'a cappella che sta usando adesso (con una scia che sfuma)
+    for (int i = 0; i < kTrail; ++i)
+    {
+        const int idx = (head + i) % kTrail;
+        const float ps = trail[(size_t) idx];
+        if (ps < 0.0f) continue;
+        const float age = (float) (i + 1) / (float) kTrail;
+        const float x = area.getX() + area.getWidth() * ps;
+        g.setColour (p.accent.withAlpha (0.15f + 0.85f * age * age));
+        if (i == kTrail - 1) g.fillRect (x - 1.0f, b.getY() + 18.0f, 2.0f, b.getHeight() - 36.0f);
+        else g.fillPath (geo::body ({ x, b.getBottom() - 11.0f }, 2.5f));
+    }
+
     g.setFont (ui::font (9.5f, true));
-    if (src == 1)
-    {
-        g.setColour (p.accent.withAlpha (0.12f));
-        g.fillRect (area);
-        g.setColour (p.accent);
-        g.drawText ("WHOLE FILE AVERAGED", b.reduced (8.0f, 4.0f).removeFromTop (12.0f), Justification::centredLeft);
-    }
-    else if (src == 2)
-    {
-        const float x = area.getX() + area.getWidth() * pos;
-        g.setColour (p.accent);
-        g.fillRect (x - 1.0f, b.getY() + 4.0f, 2.0f, b.getHeight() - 8.0f);
-        const bool frozen = proc.apvts.getRawParameterValue ("freeze")->load() > 0.5f;
-        g.drawText (frozen ? "FROZEN" : "FOLLOWING", b.reduced (8.0f, 4.0f).removeFromTop (12.0f), Justification::centredLeft);
-    }
-    else
-    {
-        g.setColour (p.text.withAlpha (0.5f));
-        g.drawText ("NOT IN USE (SOURCE: NOISE)", b.reduced (8.0f, 4.0f).removeFromTop (12.0f), Justification::centredLeft);
-    }
+    g.setColour (p.accent);
+    g.drawText ("MOMENT IN USE", b.reduced (8.0f, 4.0f).removeFromTop (12.0f), Justification::centredLeft);
+    g.setColour (p.text.withAlpha (0.7f));
+    g.drawText (String (r->model.F) + " moments analysed  -  match " + String (roundToInt (quality * 100.0f)) + " %",
+                b.reduced (8.0f, 4.0f).removeFromTop (12.0f), Justification::centredRight);
+}
+
+//==============================================================================
+StatusRow::StatusRow (WShaperProcessor& p) : proc (p)
+{
+    setInterceptsMouseClicks (false, false);
+    startTimerHz (10);
+}
+
+void StatusRow::timerCallback() { repaint(); }
+
+void StatusRow::paint (Graphics& g)
+{
+    const auto& p = palOf (*this);
+    auto b = getLocalBounds().toFloat();
+    auto& v = proc.vis();
+    const bool on = v.refActive.load() != 0;
+    const float learn = v.learn.load();
+    g.setFont (ui::font (9.5f, true));
+    const Point<float> c (b.getX() + 5.0f, b.getCentreY());
+    g.setColour (on ? p.accent : p.text.withAlpha (0.25f));
+    g.fillPath (geo::body (c, 4.0f));
+    g.setColour (p.text.withAlpha (0.75f));
+    String t = on ? (learn < 0.99f ? "LEARNING YOUR VOICE " + String (roundToInt (learn * 100.0f)) + " %" : String ("TRANSFERRING TIMBRE"))
+                  : String ("NO REFERENCE");
+    g.drawText (t, Rectangle<float> (b.getX() + 14.0f, b.getY(), 220.0f, b.getHeight()), Justification::centredLeft);
+    g.setColour (p.text.withAlpha (0.5f));
+    g.setFont (ui::font (9.5f));
+    g.drawText ("LATENCY " + String (proc.latencyMs()) + " ms", b, Justification::centredRight);
 }
 
 //==============================================================================
@@ -845,26 +721,20 @@ void WShaperEditor::Content::paint (Graphics& g)
 void WShaperEditor::Page::paint (Graphics& g)
 {
     const auto& p = palOf (*this);
-    g.setColour (p.text.withAlpha (0.6f));
-    g.setFont (ui::font (10.5f));
     if (index == 1)
-        g.drawFittedText ("NOISE: the voice is reshaped toward the chosen noise. FILE AVERAGE: toward the average timbre of the loaded file. "
-                          "FILE FOLLOW: the file runs silently in a loop and the voice continuously takes the timbre of the moment "
-                          "(RATE = how fast it runs, SMOOTH = how soft the changes are, FREEZE = hold the current timbre). "
-                          "Only the shape is copied: the level of your voice stays yours.",
-                          Rectangle<int> (16, 326, 390, 96), Justification::topLeft, 7);
-    if (index == 2)
     {
-        g.setColour (p.text.withAlpha (0.75f));
-        g.setFont (ui::font (11.0f));
-        g.drawFittedText ("Used in SIBILANTS mode: W-Shaper works only on what is detected here.",
-                          Rectangle<int> (16, 8, 390, 30), Justification::topLeft, 2);
+        g.setColour (p.text.withAlpha (0.6f));
+        g.setFont (ui::font (10.5f));
+        g.drawFittedText ("W-Shaper analyses the a cappella moment by moment. While you sing, it finds the moments where the reference "
+                          "sings the same thing (same vowel, same consonant, similar intensity) and gives your voice their timbre. "
+                          "Pitch, timing and level stay yours. Best reference: a dry a cappella of 1-3 minutes, full bandwidth, "
+                          "with plenty of different vowels and words. It takes a few seconds of your singing to learn your voice.",
+                          Rectangle<int> (16, 346, 390, 80), Justification::topLeft, 7);
     }
 }
 
 WShaperEditor::WShaperEditor (WShaperProcessor& p)
-    : AudioProcessorEditor (&p), proc (p),
-      nsView (p), nsMeter (p), refView (p), timeline (p), meters (p), lights (p)
+    : AudioProcessorEditor (&p), proc (p), nsView (p), nsMeter (p), refView (p), meters (p), status (p)
 {
     setLookAndFeel (&look);
     look.setSkin ((int) proc.apvts.state.getProperty ("skin", 0));
@@ -872,25 +742,16 @@ WShaperEditor::WShaperEditor (WShaperProcessor& p)
     addAndMakeVisible (content);
     content.addAndMakeVisible (clip);
     clip.addAndMakeVisible (strip);
-    for (auto* pg : { &pShaper, &pSource, &pDetect }) strip.addAndMakeVisible (*pg);
+    for (auto* pg : { &pTimbre, &pRef }) strip.addAndMakeVisible (*pg);
     content.addAndMakeVisible (meters);
-    content.addAndMakeVisible (lights);
+    content.addAndMakeVisible (status);
 
-    // --- SHAPER
-    pShaper.addAndMakeVisible (nsView);
-    pShaper.addAndMakeVisible (nsMeter);
-    for (auto* b : { &sibBtn, &fullBtn })
-    {
-        b->getProperties().set ("kind", "seg");
-        pShaper.addAndMakeVisible (*b);
-    }
-    sibBtn.getProperties().set ("joined", "left");
-    fullBtn.getProperties().set ("joined", "right");
-    sibBtn.setTooltip ("Works only on the consonants found by the detector (DETECT page).");
-    fullBtn.setTooltip ("Works on the whole voice, all the time.");
-    sibBtn.onClick  = [this] { setParam ("target", 0.0f); };
-    fullBtn.onClick = [this] { setParam ("target", 1.0f); };
-
+    // --- TIMBRE
+    pTimbre.addAndMakeVisible (nsView);
+    refShort.setFont (ui::font (10.5f, true));
+    refShort.setJustificationType (Justification::centredLeft);
+    refShort.setInterceptsMouseClicks (false, false);
+    pTimbre.addAndMakeVisible (refShort);
     for (int i = 0; i < wsk::Engine::kNumRes; ++i)
         resBox.addItem (i == 0 ? String ("LIVE  0 ms") : String (proc.bandsFor (i)) + " bands", i + 1);
     resAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "res", resBox);
@@ -901,10 +762,10 @@ WShaperEditor::WShaperEditor (WShaperProcessor& p)
             tip << "\n" << proc.bandsFor (i) << " bands: latency " << proc.latencyMsFor (i) << " ms";
         resBox.setTooltip (tip);
     }
-    pShaper.addAndMakeVisible (resBox);
+    pTimbre.addAndMakeVisible (resBox);
 
     range.setNormalisableRange ([] { NormalisableRange<double> r (20.0, 20000.0); r.setSkewForCentre (1000.0); return r; }());
-    range.setTooltip ("Band to reshape: drag the two ends (or the lines in the display).");
+    range.setTooltip ("Band where the timbre is transferred: drag the two ends (or the lines in the display).");
     range.onDragStart = [this]
     {
         rangeDragging = true;
@@ -921,85 +782,48 @@ WShaperEditor::WShaperEditor (WShaperProcessor& p)
         for (auto* id : { "start", "end" }) if (auto* prm = proc.apvts.getParameter (id)) prm->endChangeGesture();
         rangeDragging = false;
     };
-    pShaper.addAndMakeVisible (range);
+    pTimbre.addAndMakeVisible (range);
     for (auto* l : { &startLbl, &endLbl })
     {
         l->setFont (ui::font (10.0f, true));
         l->setInterceptsMouseClicks (false, false);
-        pShaper.addAndMakeVisible (*l);
+        pTimbre.addAndMakeVisible (*l);
     }
     startLbl.setJustificationType (Justification::centredLeft);
     endLbl.setJustificationType (Justification::centredRight);
 
-    setupKnob (slope,   pShaper, "slope",   "SLOPE",   "Steepness of both band edges.");
-    setupKnob (amount,  pShaper, "amount",  "AMOUNT",  "How far the voice moves toward the target timbre. 100% = matched (boosts limited to +18 dB).");
-    setupKnob (makeup,  pShaper, "makeup",  "MAKEUP",  "Gain inside the band only.");
-    setupKnob (attack,  pShaper, "attack",  "ATTACK",  "How fast the correction goes down (cuts) when the voice changes.");
-    setupKnob (release, pShaper, "release", "RELEASE", "How fast the correction comes back up.");
-    setupKnob (detail,  pShaper, "detail",  "DETAIL",  "Resolution of the timbre match: low = broad tone (1 octave), high = fine detail (1/24 octave).");
-    setupKnob (dynamic, pShaper, "dynamic", "DYNAMIC", "How much the intervention follows the signal level: 0% = same everywhere, 100% = less and less as the voice gets quieter, none in silence.");
-    setupKnob (formant, pShaper, "formant", "FORMANT", "Shifts the target timbre up or down in pitch (semitones): useful when the reference voice is lower or higher than yours.");
+    setupKnob (slope,    pTimbre, "slope",    "SLOPE",    "Steepness of both band edges.");
+    setupKnob (amount,   pTimbre, "amount",   "AMOUNT",   "How much of the reference timbre your voice takes. 100% = full transfer (boosts limited to +18 dB).");
+    setupKnob (makeup,   pTimbre, "makeup",   "MAKEUP",   "Gain inside the band only.");
+    setupKnob (attack,   pTimbre, "attack",   "ATTACK",   "How fast the correction goes down (cuts).");
+    setupKnob (release,  pTimbre, "release",  "RELEASE",  "How fast the correction comes back up.");
+    setupKnob (detail,   pTimbre, "detail",   "DETAIL",   "How detailed the timbre is: low = overall colour, high = every resonance of the reference voice.");
+    setupKnob (match,    pTimbre, "match",    "MATCH",    "0% = the average timbre of the reference, always the same. 100% = for every moment, the timbre of the reference "
+                                                          "singing the same thing (same vowel or consonant): the timbre changes with what you sing.");
+    setupKnob (loudness, pTimbre, "loudness", "LOUDNESS", "How much intensity counts when looking for similar moments: high = your loud notes take the timbre of the reference's loud notes.");
+    setupKnob (formant,  pTimbre, "formant",  "FORMANT",  "Shifts the reference timbre up or down (semitones). Use it if the reference voice is much higher or lower than yours.");
+    setupKnob (smooth,   pTimbre, "smooth",   "SMOOTH",   "How soft the changes of timbre are from one moment to the next.");
 
-    // --- SOURCE
-    {
-        const char* names[] = { "NOISE", "FILE AVERAGE", "FILE FOLLOW" };
-        const char* tips[]  = { "Target = the noise chosen below.",
-                                "Target = the average timbre of the whole file.",
-                                "Target = the timbre of the file at the point it is playing (silently, in a loop): the voice is reshaped continuously." };
-        const char* joined[] = { "left", "mid", "right" };
-        for (int i = 0; i < 3; ++i)
-        {
-            auto& b = srcBtns[(size_t) i];
-            b.setButtonText (names[i]);
-            b.setTooltip (tips[i]);
-            b.getProperties().set ("kind", "seg");
-            b.getProperties().set ("joined", joined[i]);
-            b.onClick = [this, i] { setParam ("source", (float) i); };
-            pSource.addAndMakeVisible (b);
-        }
-    }
-    pSource.addAndMakeVisible (loadBtn);
-    pSource.addAndMakeVisible (clearBtn);
-    loadBtn.setTooltip ("Pick an audio file from the Finder (WAV, AIFF, FLAC, MP3, M4A, CAF): another voice, an instrument, anything.");
-    clearBtn.setTooltip ("Remove the file.");
+    // --- REFERENCE
+    pRef.addAndMakeVisible (loadBtn);
+    pRef.addAndMakeVisible (clearBtn);
+    loadBtn.setTooltip ("Pick the a cappella from the Finder (WAV, AIFF, FLAC, MP3, M4A, CAF).");
+    clearBtn.setTooltip ("Remove the reference.");
     loadBtn.onClick = [this] { chooseReference(); };
     clearBtn.onClick = [this] { proc.clearReference(); refreshRefLabel(); };
     refName.setFont (ui::font (11.0f));
     refName.setJustificationType (Justification::centredLeft);
-    pSource.addAndMakeVisible (refName);
-    pSource.addAndMakeVisible (refView);
-    setupKnob (rate,   pSource, "rate",   "RATE",   "FILE FOLLOW: how fast the file runs (100% = real time).");
-    setupKnob (smooth, pSource, "smooth", "SMOOTH", "FILE FOLLOW: how soft the timbre changes are. Short = it follows every syllable, long = slow morph.");
-    setupToggle (freeze, pSource, "freeze", "FREEZE", "FILE FOLLOW: holds the timbre of this moment.");
-    for (int i = 0; i < wsk::kNumNoises; ++i)
-        noiseBox.addItem (wsk::noiseName (i), i + 1);
-    noiseAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "noise", noiseBox);
-    noiseBox.setTooltip ("Noise used in NOISE mode (and while no file is loaded).\nWHITE flat, PINK -3 dB/oct, BROWN -6 dB/oct, BLUE +3, VIOLET +6, "
-                         "GREY flat to the ear, BREATH, SILK, SMOKE, TAPE.");
-    pSource.addAndMakeVisible (noiseBox);
-    noiseLbl.setText ("NOISE", dontSendNotification);
-    noiseLbl.setFont (ui::font (10.0f, true));
-    noiseLbl.setJustificationType (Justification::centred);
-    pSource.addAndMakeVisible (noiseLbl);
-
-    // --- DETECT
-    setupToggle (detS, pDetect, "detS", "S  Z  SH", "Sibilants: S, Z and SH.");
-    setupToggle (detF, pDetect, "detF", "F  V", "Labiodental fricatives: F and V.");
-    setupToggle (detC, pDetect, "detC", "CH  J", "Affricates: CH and J sounds (Italian soft C and G).");
-    setupKnob (sensS, pDetect, "sensS", "SENS", "Sensitivity for sibilants.");
-    setupKnob (sensF, pDetect, "sensF", "SENS", "Sensitivity for F and V.");
-    setupKnob (sensC, pDetect, "sensC", "SENS", "Sensitivity for CH and J.");
-    setupKnob (hold,  pDetect, "hold",  "HOLD",  "How long detection stays on after the consonant.");
-    setupKnob (guard, pDetect, "guard", "GUARD", "Vowel protection: where there is pitched voice, detection switches off.");
-    pDetect.addAndMakeVisible (timeline);
+    pRef.addAndMakeVisible (refName);
+    pRef.addAndMakeVisible (refView);
+    pRef.addAndMakeVisible (nsMeter);
+    setupKnob (gate, pRef, "dynamic", "GATE", "How much W-Shaper backs off when your voice is quiet: 0% = same everywhere, 100% = less and less as you get quieter, nothing in silence.");
 
     // --- piede
     setupKnob (mix,    content, "mix",    "MIX",    "Dry/wet of the whole plugin.");
     setupKnob (output, content, "output", "OUTPUT", "Output volume.");
-    setupToggle (delta,  content, "delta",  "DELTA", "Listen only to the difference W-Shaper makes.", "solo");
-    setupToggle (listen, content, "listen", "CONS. ONLY", "Listen only to the detected consonants. Handy for tuning the detector.", "solo");
+    setupToggle (delta, content, "delta", "DELTA", "Listen only to the difference W-Shaper makes.", "solo");
 
-    const char* tabNames[] = { "SHAPER", "SOURCE", "DETECT" };
+    const char* tabNames[] = { "TIMBRE", "REFERENCE" };
     for (int i = 0; i < kPages; ++i)
     {
         auto& t = tabs[(size_t) i];
@@ -1047,8 +871,7 @@ WShaperEditor::~WShaperEditor()
 
 std::vector<WShaperEditor::Knob*> WShaperEditor::allKnobs()
 {
-    return { &slope, &amount, &makeup, &attack, &release, &detail, &dynamic, &formant,
-             &rate, &smooth, &sensS, &sensF, &sensC, &hold, &guard, &mix, &output };
+    return { &slope, &amount, &makeup, &attack, &release, &detail, &match, &loudness, &formant, &smooth, &gate, &mix, &output };
 }
 
 void WShaperEditor::applySkin (int index)
@@ -1062,7 +885,7 @@ void WShaperEditor::applySkin (int index)
         k->name.setColour (Label::textColourId, p.text.withAlpha (0.75f));
     }
     refName.setColour (Label::textColourId, p.strong);
-    noiseLbl.setColour (Label::textColourId, p.text.withAlpha (0.75f));
+    refShort.setColour (Label::textColourId, p.text.withAlpha (0.8f));
     startLbl.setColour (Label::textColourId, p.text.withAlpha (0.8f));
     endLbl.setColour (Label::textColourId, p.text.withAlpha (0.8f));
     sendLookAndFeelChange();
@@ -1140,21 +963,14 @@ void WShaperEditor::showPage (int newPage, bool animate)
 
 void WShaperEditor::chooseReference()
 {
-    chooser = std::make_unique<FileChooser> ("Choose a reference voice", File::getSpecialLocation (File::userHomeDirectory),
+    chooser = std::make_unique<FileChooser> ("Choose the a cappella", File::getSpecialLocation (File::userHomeDirectory),
                                              "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.caf;*.ogg");
     chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles,
                           [this] (const FileChooser& fc)
                           {
                               const auto f = fc.getResult();
-                              if (f.existsAsFile())
-                              {
-                                  if (proc.loadReference (f))
-                                  {
-                                      if (proc.apvts.getRawParameterValue ("source")->load() < 0.5f) setParam ("source", 2.0f);
-                                  }
-                                  else
-                                      refName.setText ("Unreadable format", dontSendNotification);
-                              }
+                              if (f.existsAsFile() && ! proc.loadReference (f))
+                                  refName.setText ("Unreadable format", dontSendNotification);
                               refreshRefLabel();
                           });
 }
@@ -1163,9 +979,15 @@ void WShaperEditor::refreshRefLabel()
 {
     lastRefVersion = proc.referenceVersion();
     const auto* r = proc.reference();
-    if (r == nullptr) { refName.setText ("no file", dontSendNotification); return; }
+    if (r == nullptr)
+    {
+        refName.setText ("no file", dontSendNotification);
+        refShort.setText ("NO REFERENCE  -  load an a cappella in REFERENCE", dontSendNotification);
+        return;
+    }
     const double secs = (double) r->audio.length / jmax (1.0, r->audio.sampleRate);
     refName.setText (String (r->audio.name) + "  " + String (secs, 1) + " s", dontSendNotification);
+    refShort.setText ("REFERENCE:  " + String (r->audio.name), dontSendNotification);
 }
 
 void WShaperEditor::paint (Graphics& g) { g.fillAll (look.pal().band); }
@@ -1183,13 +1005,11 @@ void WShaperEditor::resized()
 
     clip.setBounds (0, pageY, baseW, pageH);
     strip.setBounds (-roundToInt (stripShift), 0, baseW * kPages, pageH);
-    pShaper.setBounds (0, 0, baseW, pageH);
-    pSource.setBounds (baseW, 0, baseW, pageH);
-    pDetect.setBounds (baseW * 2, 0, baseW, pageH);
+    pTimbre.setBounds (0, 0, baseW, pageH);
+    pRef.setBounds (baseW, 0, baseW, pageH);
 
-    // SHAPER
-    sibBtn.setBounds (16, 10, 92, 26);   // switch unico
-    fullBtn.setBounds (107, 10, 93, 26);
+    // TIMBRE
+    refShort.setBounds (16, 10, 282, 26);
     resBox.setBounds (306, 10, 100, 26);
     nsView.setBounds (16, 44, 390, 146);
     range.setBounds (8, 192, 406, 24);
@@ -1197,44 +1017,23 @@ void WShaperEditor::resized()
     endLbl.setBounds (246, 214, 160, 14);
     Knob* r1[] = { &slope, &amount, &makeup, &attack, &release };
     for (int i = 0; i < 5; ++i) placeKnob (*r1[i], { 16 + i * 78, 234, 78, 84 });
-    Knob* r2[] = { &detail, &dynamic, &formant };
-    for (int i = 0; i < 3; ++i) placeKnob (*r2[i], { 16 + i * 78, 324, 78, 84 });
-    nsMeter.setBounds (258, 332, 148, 72);
+    Knob* r2[] = { &detail, &match, &loudness, &formant, &smooth };
+    for (int i = 0; i < 5; ++i) placeKnob (*r2[i], { 16 + i * 78, 324, 78, 84 });
 
-    // SOURCE
-    srcBtns[0].setBounds (16, 10, 130, 26);  // switch unico a tre
-    srcBtns[1].setBounds (145, 10, 131, 26);
-    srcBtns[2].setBounds (275, 10, 131, 26);
-    loadBtn.setBounds (16, 44, 104, 26);
-    refName.setBounds (126, 44, 246, 26);
-    clearBtn.setBounds (378, 44, 28, 26);
-    refView.setBounds (16, 78, 390, 140);
-    placeKnob (rate,   { 16, 226, 78, 84 });
-    placeKnob (smooth, { 94, 226, 78, 84 });
-    freeze.button.setBounds (180, 250, 96, 26);
-    noiseLbl.setBounds (284, 226, 122, 16);
-    noiseBox.setBounds (284, 250, 122, 26);
-
-    // DETECT
-    Toggle* dt[] = { &detS, &detF, &detC };
-    Knob* sk[]   = { &sensS, &sensF, &sensC };
-    for (int i = 0; i < 3; ++i)
-    {
-        const int x0 = 16 + i * 130;
-        dt[i]->button.setBounds (x0 + 10, 44, 110, 26);
-        placeKnob (*sk[i], { x0 + 26, 76, 78, 84 });
-    }
-    placeKnob (hold,  { 133, 168, 78, 84 });
-    placeKnob (guard, { 211, 168, 78, 84 });
-    timeline.setBounds (16, 262, 390, 162);
+    // REFERENCE
+    loadBtn.setBounds (16, 10, 140, 26);
+    refName.setBounds (162, 10, 210, 26);
+    clearBtn.setBounds (378, 10, 28, 26);
+    refView.setBounds (16, 44, 390, 200);
+    placeKnob (gate, { 16, 252, 78, 84 });
+    nsMeter.setBounds (102, 260, 304, 72);
 
     // piede
     placeKnob (mix,    { 16, 526, 78, 84 });
     placeKnob (output, { 94, 526, 78, 84 });
-    delta.button.setBounds (182, 534, 108, 28);
-    listen.button.setBounds (182, 570, 108, 28);
+    delta.button.setBounds (182, 554, 108, 28);
     meters.setBounds (300, 528, 106, 82);
-    lights.setBounds (16, 616, 390, 18);
+    status.setBounds (16, 616, 390, 18);
 }
 
 void WShaperEditor::timerCallback()
@@ -1252,23 +1051,10 @@ void WShaperEditor::timerCallback()
     if (++tick % 4 != 0) return;
 
     auto val = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
-    const bool full = val ("target") > 0.5f;
-    sibBtn.setToggleState (! full, dontSendNotification);
-    fullBtn.setToggleState (full, dontSendNotification);
-    const int src = (int) std::lround (val ("source"));
-    for (int i = 0; i < 3; ++i) srcBtns[(size_t) i].setToggleState (i == src, dontSendNotification);
-    const bool follow = src == 2;
-    for (auto* c : std::initializer_list<Component*> { &rate.slider, &rate.name, &smooth.slider, &smooth.name, &freeze.button })
-        c->setAlpha (follow ? 1.0f : 0.35f);
-    noiseBox.setAlpha (src == 0 || proc.reference() == nullptr ? 1.0f : 0.35f);
-    noiseLbl.setAlpha (noiseBox.getAlpha());
-
     if (! rangeDragging)
         range.setMinAndMaxValues (val ("start"), val ("end"), dontSendNotification);
     auto hzT = [] (float f) { return f < 1000.0f ? String (roundToInt (f)) + " Hz" : String (f / 1000.0f, f < 10000.0f ? 2 : 1) + " kHz"; };
     startLbl.setText ("START  " + hzT (val ("start")), dontSendNotification);
     endLbl.setText ("END  " + hzT (val ("end")), dontSendNotification);
-
     if (proc.referenceVersion() != lastRefVersion) refreshRefLabel();
-    if (delta.button.getToggleState() && listen.button.getToggleState()) setParam ("listen", 0.0f);
 }

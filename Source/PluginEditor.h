@@ -49,23 +49,6 @@ const ui::Palette& palOf (const juce::Component&);
 
 
 //==============================================================================
-// Storia del detector: cosa ha riconosciuto negli ultimi secondi
-class DetectTimeline : public juce::Component, private juce::Timer
-{
-public:
-    explicit DetectTimeline (WShaperProcessor&);
-    void paint (juce::Graphics&) override;
-
-private:
-    void timerCallback() override;
-    WShaperProcessor& proc;
-    static constexpr int kCols = 600;
-    struct Col { float s = 0, f = 0, c = 0, d = 0, lvl = 0; };
-    std::array<Col, kCols> cols {};
-    int head = 0;
-    uint32_t readPos = 0;
-};
-
 // IN / GR / OUT nel piede
 class Meters : public juce::Component, private juce::Timer
 {
@@ -115,21 +98,8 @@ private:
     float level = -120.0f, ref = -60.0f, amt = 0.0f;
 };
 
-// Luci delle classi rilevate + latenza
-class DetectLights : public juce::Component, private juce::Timer
-{
-public:
-    explicit DetectLights (WShaperProcessor&);
-    void paint (juce::Graphics&) override;
 
-private:
-    void timerCallback() override;
-    WShaperProcessor& proc;
-    std::array<float, 3> lv {};
-};
-
-
-// SOURCE: forma d'onda del riferimento con il punto di lettura
+// REFERENCE: forma d'onda dell'a cappella, con il punto che sta usando adesso
 class RefView : public juce::Component, private juce::Timer
 {
 public:
@@ -139,7 +109,22 @@ public:
 private:
     void timerCallback() override;
     WShaperProcessor& proc;
-    float pos = 0.0f;
+    static constexpr int kTrail = 24;
+    std::array<float, kTrail> trail {};
+    int head = 0;
+    float quality = 0.0f;
+};
+
+// riga di stato nel piede: modello, apprendimento della tua voce, latenza
+class StatusRow : public juce::Component, private juce::Timer
+{
+public:
+    explicit StatusRow (WShaperProcessor&);
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override;
+    WShaperProcessor& proc;
 };
 
 //==============================================================================
@@ -155,8 +140,8 @@ public:
     static constexpr int baseW = 422, baseH = 640;
     static constexpr int pageY = 86, pageH = 434;
     static constexpr double pageAnimMs = 600.0;
-    static constexpr int kPages = 3;
-    static constexpr float tabW = 130.0f;
+    static constexpr int kPages = 2;
+    static constexpr float tabW = 195.0f;
 
 private:
     void timerCallback() override;
@@ -201,38 +186,28 @@ private:
     FlatLook look;
     Content content;
     juce::Component clip, strip;
-    Page pShaper { 0 }, pSource { 1 }, pDetect { 2 };
+    Page pTimbre { 0 }, pRef { 1 };
 
     NsView nsView;
     NsMeter nsMeter;
     RefView refView;
-    DetectTimeline timeline;
     Meters meters;
-    DetectLights lights;
+    StatusRow status;
 
-    // SHAPER
-    juce::TextButton sibBtn { "SIBILANTS" }, fullBtn { "FULL SIGNAL" };
+    // TIMBRE
+    juce::Label refShort;
     juce::ComboBox resBox;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> resAtt;
     juce::Slider range { juce::Slider::TwoValueHorizontal, juce::Slider::NoTextBox };
     juce::Label startLbl, endLbl;
     bool rangeDragging = false;
-    Knob slope, amount, makeup, attack, release, detail, dynamic, formant;
-    // SOURCE
-    std::array<juce::TextButton, 3> srcBtns;
-    juce::TextButton loadBtn { "LOAD FILE" }, clearBtn { "X" };
+    Knob slope, amount, makeup, attack, release, detail, match, loudness, formant, smooth, gate;
+    // REFERENCE
+    juce::TextButton loadBtn { "LOAD A CAPPELLA" }, clearBtn { "X" };
     juce::Label refName;
-    Knob rate, smooth;
-    Toggle freeze;
-    juce::ComboBox noiseBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> noiseAtt;
-    juce::Label noiseLbl;
-    // DETECT
-    Knob sensS, sensF, sensC, hold, guard;
-    Toggle detS, detF, detC;
     // piede
     Knob mix, output;
-    Toggle delta, listen;
+    Toggle delta;
 
     std::array<juce::TextButton, kPages> tabs;
     juce::ComboBox presetBox, skinBox;

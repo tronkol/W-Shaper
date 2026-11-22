@@ -4,12 +4,11 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "WShaperDSP.h"
 
-// riferimento caricato da file: audio (per FOLLOW) + timbro medio per banda (per PROFILE)
+// a cappella di riferimento: audio (per la forma d'onda) + modello del timbro
 struct RefData
 {
     wsk::TextureData audio;
-    std::vector<float> profile; // dB per banda, calcolato con FFT di profileN punti
-    int profileN = 0;
+    wsk::TimbreModel model;
 };
 
 class WShaperProcessor : public juce::AudioProcessor,

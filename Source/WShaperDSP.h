@@ -186,6 +186,173 @@ inline float nsBandWeight (float f, float start, float end, float slopeDbOct)
     return std::pow (10.0f, -slopeDbOct * oct / 20.0f);
 }
 
+//==============================================================================
+// MODELLO DEL TIMBRO (W-SHAPER)
+// Per ogni istante dell'a cappella di riferimento si salvano:
+//  - il timbro: cepstro (forma dello spettro staccata dall'intonazione), kCeps coefficienti
+//  - l'impronta di cosa si sta cantando: 12 MFCC + intensita', normalizzati sulla voce stessa
+// Mentre canti, la tua impronta (normalizzata sulla TUA voce) cerca gli istanti piu' simili
+// dell'a cappella, e il loro timbro diventa il bersaglio.
+constexpr int kCeps = 80;   // coefficienti di timbro salvati (il DETAIL ne usa da 16 a 80)
+constexpr int kFeat = 13;   // 12 MFCC + intensita'
+constexpr int kMel  = 26;
+
+struct MelBank
+{
+    std::vector<int> k0, k1;            // bande di ogni filtro
+    std::vector<std::vector<float>> w;  // pesi
+};
+
+inline MelBank makeMel (int N, float sr)
+{
+    MelBank m;
+    const int K = N / 2 + 1;
+    auto mel  = [] (float f) { return 2595.0f * std::log10 (1.0f + f / 700.0f); };
+    auto imel = [] (float x) { return 700.0f * (std::pow (10.0f, x / 2595.0f) - 1.0f); };
+    const float lo = mel (80.0f), hi = mel (std::min (12000.0f, sr * 0.45f));
+    std::vector<float> c ((size_t) kMel + 2);
+    for (int i = 0; i < kMel + 2; ++i) c[(size_t) i] = imel (lo + (hi - lo) * (float) i / (float) (kMel + 1)) / (sr / (float) N);
+    for (int b = 0; b < kMel; ++b)
+    {
+        const float a = c[(size_t) b], m0 = c[(size_t) b + 1], z = c[(size_t) b + 2];
+        const int ka = std::max (1, (int) std::floor (a)), kz = std::min (K - 1, (int) std::ceil (z));
+        std::vector<float> w;
+        for (int k = ka; k <= kz; ++k)
+        {
+            const float x = (float) k;
+            w.push_back (std::max (0.0f, x < m0 ? (x - a) / std::max (1.0e-3f, m0 - a) : (z - x) / std::max (1.0e-3f, z - m0)));
+        }
+        m.k0.push_back (ka); m.k1.push_back (kz); m.w.push_back (std::move (w));
+    }
+    return m;
+}
+
+// impronta: 12 MFCC (c1..c12) + intensita' (log energia), da uno spettro di potenza
+inline void melFeatures (const float* P, const MelBank& m, float* out)
+{
+    float lm[kMel];
+    for (int b = 0; b < kMel; ++b)
+    {
+        double e = 0.0;
+        const auto& w = m.w[(size_t) b];
+        for (int k = m.k0[(size_t) b], i = 0; k <= m.k1[(size_t) b]; ++k, ++i) e += (double) P[k] * w[(size_t) i];
+        lm[b] = (float) std::log (e + 1.0e-12);
+    }
+    for (int n = 1; n <= 12; ++n)
+    {
+        double s = 0.0;
+        for (int b = 0; b < kMel; ++b) s += lm[b] * std::cos (kPi * (float) n * ((float) b + 0.5f) / (float) kMel);
+        out[n - 1] = (float) s;
+    }
+    double e = 0.0;
+    for (int b = 0; b < kMel; ++b) e += lm[b];
+    out[12] = (float) (e / kMel);
+}
+
+// cepstro reale (primi kCeps coefficienti) di uno spettro di potenza; buf lungo N
+inline void powerCepstrum (const float* P, int N, const FFT& fft, std::vector<cpx>& buf, float* outC)
+{
+    const int K = N / 2 + 1;
+    for (int k = 0; k < K; ++k)
+    {
+        const float l = std::log (P[k] + 1.0e-12f);
+        buf[(size_t) k] = { l, 0.0f };
+        if (k > 0 && k < N / 2) buf[(size_t) (N - k)] = { l, 0.0f };
+    }
+    fft.transform (buf.data(), true);
+    for (int n = 0; n < kCeps; ++n) outC[n] = buf[(size_t) n].real() / (float) N;
+}
+
+struct TimbreModel
+{
+    int N = 0, F = 0;
+    std::vector<float> ceps;          // F x kCeps
+    std::vector<float> feat;          // F x kFeat, gia' normalizzati
+    std::vector<float> pos;           // F, posizione nel file 0..1
+    std::vector<float> avgCeps;       // kCeps, timbro medio
+    float topHz = 20000.0f;           // fin dove l'a cappella ha davvero contenuto (MP3, registrazioni a banda stretta)
+    std::array<float, kFeat> mean {}, sd {};
+};
+
+// costruisce il modello dall'a cappella (mono, al sample rate dell'host); N = FFT del motore
+inline TimbreModel buildTimbreModel (const float* x, int len, float sr, int N)
+{
+    TimbreModel m;
+    m.N = N;
+    if (len < N) return m;
+    const int K = N / 2 + 1;
+    const int hop = std::max (N / 4, (len - N) / 8000 + 1);
+    FFT fft; fft.init (N);
+    std::vector<cpx> buf ((size_t) N), cb ((size_t) N);
+    std::vector<float> win ((size_t) N), P ((size_t) K);
+    for (int j = 0; j < N; ++j) win[(size_t) j] = 0.5f - 0.5f * std::cos (2.0f * kPi * (float) j / (float) N);
+    const MelBank mb = makeMel (N, sr);
+    const float pnorm = 16.0f / ((float) N * (float) N);
+    std::vector<float> allC, allF, allPos, lvl;
+    for (int s0 = 0; s0 + N <= len; s0 += hop)
+    {
+        for (int j = 0; j < N; ++j) buf[(size_t) j] = { x[s0 + j] * win[(size_t) j], 0.0f };
+        fft.transform (buf.data(), false);
+        double tot = 0.0;
+        for (int k = 0; k < K; ++k) { P[(size_t) k] = std::norm (buf[(size_t) k]) * pnorm; tot += P[(size_t) k]; }
+        float c[kCeps], f[kFeat];
+        powerCepstrum (P.data(), N, fft, cb, c);
+        melFeatures (P.data(), mb, f);
+        allC.insert (allC.end(), c, c + kCeps);
+        allF.insert (allF.end(), f, f + kFeat);
+        allPos.push_back ((float) (s0 + N / 2) / (float) len);
+        lvl.push_back ((float) tot);
+    }
+    const float mx = lvl.empty() ? 0.0f : *std::max_element (lvl.begin(), lvl.end());
+    // solo gli istanti con voce: fino a 45 dB sotto il piu' forte
+    std::vector<int> keep;
+    for (size_t i = 0; i < lvl.size(); ++i) if (lvl[i] > mx * 3.16e-5f) keep.push_back ((int) i);
+    m.F = (int) keep.size();
+    if (m.F == 0) return m;
+    m.ceps.resize ((size_t) m.F * kCeps); m.feat.resize ((size_t) m.F * kFeat); m.pos.resize ((size_t) m.F);
+    m.avgCeps.assign (kCeps, 0.0f);
+    std::array<double, kFeat> mu {}, s2 {};
+    for (int i = 0; i < m.F; ++i)
+    {
+        const int src = keep[(size_t) i];
+        std::copy (allC.begin() + (size_t) src * kCeps, allC.begin() + (size_t) (src + 1) * kCeps, m.ceps.begin() + (size_t) i * kCeps);
+        for (int n = 0; n < kCeps; ++n) m.avgCeps[(size_t) n] += allC[(size_t) src * kCeps + (size_t) n] / (float) m.F;
+        for (int d = 0; d < kFeat; ++d) mu[(size_t) d] += allF[(size_t) src * kFeat + (size_t) d];
+        m.pos[(size_t) i] = allPos[(size_t) src];
+    }
+    for (auto& v : mu) v /= m.F;
+    for (int i = 0; i < m.F; ++i)
+        for (int d = 0; d < kFeat; ++d)
+        {
+            const double t = allF[(size_t) keep[(size_t) i] * kFeat + (size_t) d] - mu[(size_t) d];
+            s2[(size_t) d] += t * t;
+        }
+    for (int d = 0; d < kFeat; ++d)
+    {
+        m.mean[(size_t) d] = (float) mu[(size_t) d];
+        m.sd[(size_t) d] = (float) std::sqrt (std::max (1.0e-6, s2[(size_t) d] / m.F));
+    }
+    // banda utile dell'a cappella: dove il timbro medio resta entro 45 dB dal suo massimo
+    {
+        std::vector<float> envDb ((size_t) K);
+        float mxDb = -1.0e9f;
+        for (int k = 0; k < K; ++k)
+        {
+            float e = m.avgCeps[0];
+            for (int n = 1; n <= 40; ++n) e += 2.0f * m.avgCeps[(size_t) n] * std::cos (2.0f * kPi * (float) n * (float) k / (float) N);
+            envDb[(size_t) k] = e * 4.3429448f;
+            if ((float) k * sr / (float) N > 100.0f) mxDb = std::max (mxDb, envDb[(size_t) k]);
+        }
+        int top = K - 1;
+        while (top > 1 && envDb[(size_t) top] < mxDb - 45.0f) --top;
+        m.topHz = std::min (20000.0f, (float) top * sr / (float) N);
+    }
+    for (int i = 0; i < m.F; ++i)
+        for (int d = 0; d < kFeat; ++d)
+            m.feat[(size_t) i * kFeat + (size_t) d] = (allF[(size_t) keep[(size_t) i] * kFeat + (size_t) d] - m.mean[(size_t) d]) / m.sd[(size_t) d];
+    return m;
+}
+
 struct Params
 {
     // SMOKER
@@ -224,7 +391,9 @@ struct Params
     float nsSpeedMs = 15.0f;
     float nsDetail = 0.5f;       // 0..1
     // W-SHAPER: riferimento da file
-    int   nsSource = 0;          // 0 NOISE, 1 FILE PROFILE (timbro medio), 2 FILE FOLLOW (timbro del momento, il file scorre)
+    int   nsSource = 0;          // (non usato in W-Shaper)
+    float tmMatch = 0.8f;        // 0 = timbro medio dell'a cappella, 1 = timbro dell'istante piu' simile
+    float tmLoud = 0.3f;         // peso dell'intensita' nella ricerca degli istanti simili
     float nsFormantSt = 0.0f;    // sposta il timbro di riferimento (semitoni)
     float nsRate = 1.0f;         // velocita' di scorrimento del file in FOLLOW
     float nsSmoothMs = 60.0f;    // morbidezza dei cambi di timbro in FOLLOW
@@ -246,7 +415,8 @@ struct Vis
     std::atomic<float> texHP { 20.0f }, texLP { 20000.0f };
     std::atomic<float> nsLevel { -120.0f }, nsRef { -60.0f }, nsAmtNow { 0.0f };
     std::atomic<float> refPos { 0.0f };
-    std::atomic<int>   refActive { 0 };   // 1 = il riferimento da file e' in uso
+    std::atomic<int>   refActive { 0 };   // 1 = il modello dell'a cappella e' in uso
+    std::atomic<float> matchQ { 0.0f }, learn { 0.0f };
     std::atomic<int>   cls { 0 };
 
     static constexpr int kHist = 1024;
@@ -368,7 +538,14 @@ public:
         nsP.assign ((size_t) K, 0.0f); nsSm.assign ((size_t) K, -120.0f); nsG.assign ((size_t) K, 0.0f);
         nsTgt.assign ((size_t) K, 0.0f); nsW.assign ((size_t) K, 0.0f); hwN.assign ((size_t) K, 1);
         curTgt.assign ((size_t) K, 0.0f); tgtTmp.assign ((size_t) K, 0.0f); followDb.assign ((size_t) K, -120.0f);
-        rbuf.assign ((size_t) N, cpx {}); refPos = 0.0; followValid = false;
+        rbuf.assign ((size_t) N, cpx {});
+        mel = makeMel (N, sr);
+        cosT.assign ((size_t) (kCeps + 1) * (size_t) K, 0.0f);
+        for (int n = 0; n <= kCeps; ++n)
+            for (int k = 0; k < K; ++k)
+                cosT[(size_t) n * (size_t) K + (size_t) k] = std::cos (2.0f * kPi * (float) n * (float) k / (float) N);
+        inCeps.assign (kCeps, 0.0f); dynCeps.assign (kCeps, 0.0f); tgtCeps.assign (kCeps, 0.0f); bandW.assign ((size_t) K, 0.0f);
+        inMean.fill (0.0f); inVar.fill (1.0f); inSd.fill (1.0f); learned = 0.0f; tgtValid = false; statsInit = false;
         nsLastDetail = -1.0f; nsLastNoise = -1; nsLastStart = nsLastEnd = nsLastSlope = -1.0f; nsOffset = 0.0f; nsPeakDb = -100.0f;
         bandValid = false;
         // LIVE: filtri FIR a fase minima, ricalcolati a ogni passo e interpolati
@@ -425,7 +602,7 @@ public:
     void setParams (const Params& p) { prm = p; }
     void setTexture (const TextureData* t) { tex = t; }
     // riferimento W-SHAPER: audio (per FOLLOW) e profilo medio in dB per banda (per PROFILE, lungo K)
-    void setReference (const TextureData* audio, const std::vector<float>* profile) { refAudio = audio; refProfile = profile; }
+    void setModel (const TimbreModel* m) { model = (m != nullptr && m->N == N) ? m : nullptr; }
     Vis& vis() { return v; }
 
     // audio in place. numCh 1 o 2
@@ -779,41 +956,65 @@ private:
         }
     }
 
-    // FOLLOW: il file scorre (in silenzio) e a ogni passo se ne misura il timbro nel punto attuale
-    void followStep()
+    //--------------------------------------------------------------------------
+    // TIMBRO: bersaglio dinamico dal modello dell'a cappella, poi correzione come N-SHAPER
+    void envelopeFromCeps (const float* c, float* outDb)
     {
-        const TextureData* r = refAudio;
-        const int len = r->length;
-        if (refPos >= (double) len) refPos = 0.0;
-        const int p0 = (int) refPos;
-        const float* c0 = r->ch[0].data();
-        const float* c1 = r->numCh > 1 ? r->ch[1].data() : c0;
-        for (int j = 0; j < N; ++j)
+        // DETAIL: quanti coefficienti di timbro (da 16 = colore largo a 80 = dettaglio fine)
+        const int nL = 16 + (int) std::lround (64.0f * clamp01 (prm.nsDetail));
+        const float toDb = 10.0f / std::log (10.0f);
+        for (int k = 0; k < K; ++k) outDb[k] = c[0];
+        for (int n = 1; n <= nL; ++n)
         {
-            const int idx = (p0 + j) % len;
-            rbuf[(size_t) j] = { 0.5f * (c0[idx] + c1[idx]) * win[(size_t) j], 0.0f };
+            const float taper = (float) n > (float) nL * 0.8f ? 0.5f + 0.5f * std::cos (kPi * ((float) n - (float) nL * 0.8f) / ((float) nL * 0.2f + 1.0f)) : 1.0f;
+            const float cn = 2.0f * c[n] * taper;
+            const float* ct = cosT.data() + (size_t) n * (size_t) K;
+            for (int k = 0; k < K; ++k) outDb[k] += cn * ct[k];
         }
-        fft.transform (rbuf.data(), false);
-        const float pnorm = 16.0f / ((float) N * (float) N);
-        double tot = 0.0;
-        for (int k = 0; k < K; ++k)
+        for (int k = 0; k < K; ++k) outDb[k] *= toDb;
+    }
+
+    void matchModel (const float* inFeat)
+    {
+        const TimbreModel& m = *model;
+        // impronta normalizzata sulla tua voce (statistiche imparate mentre canti)
+        float q[kFeat];
+        for (int d = 0; d < kFeat; ++d) q[d] = (inFeat[d] - inMean[(size_t) d]) / std::max (1.0e-3f, inSd[(size_t) d]);
+        const float wl = prm.tmLoud * 2.0f;
+        // i 6 istanti piu' vicini
+        constexpr int kNN = 6;
+        float bd[kNN]; int bi[kNN];
+        for (int j = 0; j < kNN; ++j) { bd[j] = 1.0e30f; bi[j] = -1; }
+        for (int f = 0; f < m.F; ++f)
         {
-            const float pw = std::norm (rbuf[(size_t) k]) * pnorm;
-            tot += pw;
-            tmp[(size_t) k] = powToDb (pw);
+            const float* r = m.feat.data() + (size_t) f * kFeat;
+            float dsum = 0.0f;
+            for (int d = 0; d < 12; ++d) { const float t = q[d] - r[d]; dsum += t * t; }
+            const float tl = q[12] - r[12];
+            dsum += wl * wl * tl * tl;
+            if (dsum < bd[kNN - 1])
+            {
+                int j = kNN - 1;
+                while (j > 0 && bd[j - 1] > dsum) { bd[j] = bd[j - 1]; bi[j] = bi[j - 1]; --j; }
+                bd[j] = dsum; bi[j] = f;
+            }
         }
-        if (! prm.nsFreeze)
+        float wsum = 0.0f;
+        std::fill (dynCeps.begin(), dynCeps.end(), 0.0f);
+        for (int j = 0; j < kNN; ++j)
         {
-            refPos += (double) hop * (double) std::max (0.05f, prm.nsRate);
-            while (refPos >= (double) len) refPos -= (double) len;
+            if (bi[j] < 0) continue;
+            const float w = 1.0f / (bd[j] + 0.5f);
+            wsum += w;
+            const float* c = m.ceps.data() + (size_t) bi[j] * kCeps;
+            for (int n = 0; n < kCeps; ++n) dynCeps[(size_t) n] += w * c[n];
         }
-        v.refPos = (float) (refPos / (double) len);
-        // i silenzi del file non diventano un bersaglio: si tiene l'ultimo timbro valido
-        if (prm.nsFreeze || powToDb ((float) tot) < -70.0f) return;
-        boxSmooth (tmp.data(), tmp2.data(), hwN);
-        const float a = coefFor (prm.nsSmoothMs, hopSec);
-        if (! followValid) { std::copy (tmp2.begin(), tmp2.end(), followDb.begin()); followValid = true; }
-        else for (int k = 0; k < K; ++k) followDb[(size_t) k] += a * (tmp2[(size_t) k] - followDb[(size_t) k]);
+        if (wsum > 0.0f) for (auto& c : dynCeps) c /= wsum;
+        if (bi[0] >= 0)
+        {
+            v.refPos = m.pos[(size_t) bi[0]];
+            v.matchQ = 1.0f / (1.0f + std::sqrt (bd[0] / 13.0f));
+        }
     }
 
     void computeNShaper (const cpx* const* OX, int nc)
@@ -823,31 +1024,66 @@ private:
         const float aAtt = coefFor (prm.nsAttackMs, hopSec), aRel = coefFor (prm.nsReleaseMs, hopSec);
         const float pnorm = 16.0f / ((float) N * (float) N);
 
+        double totIn = 0.0;
         for (int k = 0; k < K; ++k)
         {
             float p = 0.0f;
             for (int c = 0; c < nc; ++c) p += std::norm (OX[c][k]);
             p *= pnorm / (float) nc;
             nsP[(size_t) k] += a * (p - nsP[(size_t) k]);
-            Ls[(size_t) k] = powToDb (nsP[(size_t) k]);
+            totIn += nsP[(size_t) k];
         }
-        boxSmooth (Ls.data(), nsSm.data(), hwN);
+        // timbro della tua voce: stesso metodo (cepstro) usato per l'a cappella
+        powerCepstrum (nsP.data(), N, fft, mpbuf, inCeps.data());
+        envelopeFromCeps (inCeps.data(), nsSm.data());
 
-        // bersaglio: rumore, timbro medio del file, o timbro del file nel punto in cui sta scorrendo
-        const float* base = nsTgt.data();
-        bool fileOk = false;
-        if (prm.nsSource == 1 && refProfile != nullptr && (int) refProfile->size() == K)
+        const bool modelOk = model != nullptr && model->F > 0;
+        v.refActive = modelOk ? 1 : 0;
+        const bool voiced = powToDb ((float) totIn) > -70.0f;
+        if (modelOk && (! statsInit || model != lastModel))
         {
-            boxSmooth (refProfile->data(), tgtTmp.data(), hwN);
-            base = tgtTmp.data();
-            fileOk = true;
+            // la tua voce parte con le statistiche dell'a cappella e poi impara le sue
+            for (int d = 0; d < kFeat; ++d)
+            {
+                inMean[(size_t) d] = model->mean[(size_t) d];
+                inSd[(size_t) d] = model->sd[(size_t) d];
+                inVar[(size_t) d] = model->sd[(size_t) d] * model->sd[(size_t) d];
+            }
+            std::copy (model->avgCeps.begin(), model->avgCeps.end(), dynCeps.begin());
+            statsInit = true; lastModel = model; learned = 0.0f; tgtValid = false;
         }
-        else if (prm.nsSource == 2 && refAudio != nullptr && refAudio->length > N)
+        if (modelOk)
         {
-            followStep();
-            if (followValid) { base = followDb.data(); fileOk = true; }
+            const TimbreModel& m = *model;
+            if (voiced)
+            {
+                float f[kFeat];
+                melFeatures (nsP.data(), mel, f);
+                // statistiche della tua voce: partono da quelle dell'a cappella e si adattano in ~4 s
+                const float al = coefFor (4000.0f, hopSec);
+                for (int d = 0; d < kFeat; ++d)
+                {
+                    inMean[(size_t) d] += al * (f[d] - inMean[(size_t) d]);
+                    const float dv = f[d] - inMean[(size_t) d];
+                    inVar[(size_t) d] += al * (dv * dv - inVar[(size_t) d]);
+                    inSd[(size_t) d] = std::sqrt (std::max (1.0e-4f, inVar[(size_t) d]));
+                }
+                learned = std::min (1.0f, learned + hopSec / 4.0f);
+                v.learn = learned;
+                if (! live || (frameIdx & 1) == 0) matchModel (f);
+            }
+            // MATCH: tra timbro medio e timbro dell'istante simile; SMOOTH: morbidezza dei cambi
+            const float as = coefFor (prm.nsSmoothMs, hopSec);
+            for (int n = 0; n < kCeps; ++n)
+            {
+                const float t = m.avgCeps[(size_t) n] + (dynCeps[(size_t) n] - m.avgCeps[(size_t) n]) * prm.tmMatch;
+                if (! tgtValid) tgtCeps[(size_t) n] = t;
+                else if (voiced) tgtCeps[(size_t) n] += as * (t - tgtCeps[(size_t) n]);
+            }
+            tgtValid = true;
+            envelopeFromCeps (tgtCeps.data(), tgtTmp.data());
         }
-        v.refActive = fileOk ? 1 : 0;
+        const float* base = modelOk ? tgtTmp.data() : nsSm.data(); // senza a cappella: nessuna correzione
         // FORMANT: il timbro di riferimento viene spostato in frequenza
         if (std::abs (prm.nsFormantSt) > 0.01f)
         {
@@ -864,44 +1100,48 @@ private:
         else
             std::copy (base, base + K, curTgt.begin());
 
-        // allineamento: il riferimento viene messo al livello medio (in dB) della banda
-        double sw = 0.0, sd = 0.0, pe = 0.0;
+        // sopra la banda utile dell'a cappella non si corregge (niente alte tagliate per un MP3)
+        const float refTop = modelOk ? model->topHz : 20000.0f;
+        for (int k = 0; k < K; ++k)
+        {
+            const float f = (float) k * binHz;
+            bandW[(size_t) k] = nsW[(size_t) k] * (f <= refTop ? 1.0f : std::pow (10.0f, -48.0f * std::log2 (f / refTop) / 20.0f));
+        }
+        // allineamento in energia: dentro la banda il timbro di riferimento ha la stessa energia della tua voce,
+        // quindi il volume non cambia, cambia solo la forma
+        double sw = 0.0, pe = 0.0, pin = 0.0, ptg = 0.0;
         for (int k = 1; k < K; ++k)
         {
-            const float w = nsW[(size_t) k];
+            const float w = bandW[(size_t) k];
             if (w < 0.01f) continue;
-            sw += w; sd += w * (nsSm[(size_t) k] - curTgt[(size_t) k]); pe += w * nsP[(size_t) k];
+            sw += w; pe += w * nsP[(size_t) k];
+            pin += w * std::pow (10.0f, nsSm[(size_t) k] * 0.1f);
+            ptg += w * std::pow (10.0f, curTgt[(size_t) k] * 0.1f);
         }
-        const float off = sw > 0.0 ? (float) (sd / sw) : 0.0f;
+        const float off = (pin > 0.0 && ptg > 0.0) ? (float) (10.0 * std::log10 (pin / ptg)) : 0.0f;
         nsOffset = off;
-        // DYNAMIC: presenza del segnale = livello della banda rispetto ai suoi picchi recenti,
-        // graduale su 60 dB (1 sul picco, 0 sessanta dB sotto o nel silenzio).
-        // A DYNAMIC 0 l'intervento e' sempre AMOUNT; a 100% scala con la presenza.
         const float bandDb = sw > 0.0 ? powToDb ((float) pe) : -150.0f;
         nsPeakDb = bandDb > nsPeakDb ? bandDb : std::max (-100.0f, nsPeakDb - 3.0f * hopSec);
         const float presence = clamp01 ((bandDb - (nsPeakDb - 60.0f)) / 60.0f);
-        const float amt = prm.nsAmount * (1.0f - prm.nsDynamic * (1.0f - presence));
+        const float amt = modelOk ? prm.nsAmount * (1.0f - prm.nsDynamic * (1.0f - presence)) : 0.0f;
         v.nsRef = nsPeakDb;
-        const float when = prm.nsFull ? 1.0f : dEnv;             // solo consonanti, o sempre
         v.nsLevel = bandDb;
-        v.nsAmtNow = amt * when;
-        const bool silent = bandDb < -140.0f;                    // zero digitale: niente da rimodellare
+        v.nsAmtNow = amt;
+        const bool silent = bandDb < -140.0f;
 
         for (int k = 0; k < K; ++k)
         {
-            const float w = nsW[(size_t) k];
+            const float w = bandW[(size_t) k];
             float d = silent ? 0.0f : amt * (curTgt[(size_t) k] + off - nsSm[(size_t) k]);
             d = d > 0.0f ? std::min (d, 18.0f) : std::max (d, -40.0f);
-            const float tg = w * (d + prm.nsMakeupDb) * when;
-            // ATTACK quando la correzione scende (taglia di piu'), RELEASE quando torna su
+            const float tg = w * (d + (modelOk ? prm.nsMakeupDb : 0.0f));
             float& gs = nsG[(size_t) k];
             gs += (tg < gs ? aAtt : aRel) * (tg - gs);
-            const float gdb = gs;
-            const float lin = dbToLin (gdb);
+            const float lin = dbToLin (gs);
             for (int c = 0; c < nc; ++c)
             {
                 gainLin[c][(size_t) k] = lin;
-                g[c][(size_t) k] = std::max (0.0f, -gdb);
+                g[c][(size_t) k] = std::max (0.0f, -gs);
             }
         }
         for (int c = 0; c < nc; ++c)
@@ -1180,7 +1420,7 @@ private:
 
         // detector sul frame piu' recente
         float vow = 0.0f;
-        const float raw = prm.bypass ? 0.0f : detect (vow);
+        const float raw = 0.0f; (void) vow; // W-Shaper: niente detector
         dHist[(size_t) (detIdx % kDetHist)] = raw;
         vowHist[(size_t) (detIdx % kDetHist)] = vow;
 
@@ -1490,7 +1730,7 @@ private:
 
         // detector ogni ~5 ms, nessun lookahead
         if ((frameIdx & 1) == 0)
-            liveRaw = prm.bypass ? 0.0f : detect (liveVow);
+            liveRaw = 0.0f; // W-Shaper: niente detector
         const float holdCoef = std::exp (-hopSec / std::max (0.005f, prm.holdMs * 0.001f));
         dEnv = liveRaw > dEnv ? liveRaw : liveRaw + (dEnv - liveRaw) * holdCoef;
         v.det = dEnv;
@@ -1659,10 +1899,13 @@ private:
     std::vector<float> mkLin[2], mkDb[2], texFilt;
     std::vector<float> nsP, nsSm, nsG, nsTgt, nsW, curTgt, tgtTmp, followDb;
     std::vector<cpx> rbuf;
-    const TextureData* refAudio = nullptr;
-    const std::vector<float>* refProfile = nullptr;
-    double refPos = 0.0;
-    bool followValid = false;
+    const TimbreModel* model = nullptr;
+    MelBank mel;
+    std::vector<float> cosT, inCeps, dynCeps, tgtCeps, bandW;
+    std::array<float, kFeat> inMean {}, inVar {}, inSd {};
+    float learned = 0.0f;
+    bool tgtValid = false, statsInit = false;
+    const TimbreModel* lastModel = nullptr;
     std::vector<int> hwN;
     float nsLastDetail = -1.0f, nsLastStart = -1.0f, nsLastEnd = -1.0f, nsLastSlope = -1.0f, nsOffset = 0.0f;
     int nsLastNoise = -1;

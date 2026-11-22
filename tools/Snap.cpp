@@ -30,9 +30,9 @@ int main (int argc, char** argv)
         for (int c = 0; c < 2; ++c) buf.copyFrom (c, 0, x.data() + i, 512);
         proc.processBlock (buf, midi);
     }
-    const char* pages[] = { "shaper", "source", "detect" };
+    const char* pages[] = { "timbre", "reference" };
     for (int skin = 0; skin < (int) ui::skins().size(); ++skin)
-        for (int pg = 0; pg < 3; ++pg)
+        for (int pg = 0; pg < 2; ++pg)
         {
             if (skin > 0 && pg > 0) continue;
             proc.apvts.state.setProperty ("skin", skin, nullptr);
